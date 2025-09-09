@@ -127,7 +127,7 @@ ggstack <- function(
     assertions::assert_no_duplicates(data[[col_id]])
   }
 
-  # Sort Order -------------------------------------------------------------------
+  # Sort Order (rows/x-axis) -------------------------------------------------------------------
   # convert ID col to factor if not already
   if (!is.factor(data[[col_id]])) {
     data[[col_id]] <- as.factor(data[[col_id]])
@@ -135,9 +135,10 @@ ggstack <- function(
 
   if (verbose) cli::cli_h3("Sorting")
 
-  if (is.null(col_sort)) {
+  if (is.null(col_sort)) { # Sort X axis by order of appearance
     if (verbose >= 1) cli::cli_alert_info("Sorting X axis by: Order of appearance")
-  } else {
+  }
+  else { # Sort X axis based on col_sort
     assertions::assert_character_vector(col_sort)
     assertions::assert_length_greater_than(col_sort, length = 0)
     assertions::assert_names_include(data, names = col_sort, msg = "Column {.code {col_sort}} does not exist in your dataset. Please set the {.arg col_sort} argument to a valid column name.")
@@ -158,17 +159,25 @@ ggstack <- function(
     order_hierarchical <- do.call(order, ranks)
     data <- data[order_hierarchical,]
     data[[col_id]] <- fct_inorder(data[[col_id]])
-
-    # Order columns based on col_sort
-    if(order_matches_sort) {
-      data <- data[,c(col_sort, setdiff(colnames(data), col_sort))]
-    }
   }
+
+  # Ordering Columns (decides order in which they're stacked). Does not affect sorting of samples
+  # Order columns based on cols_to_plot
+  if(!is.null(cols_to_plot)){
+    data <- data[,c(cols_to_plot, setdiff(colnames(data), cols_to_plot))]
+  }
+
+  # Overwrite column order based on col_sort when supplied
+  if(order_matches_sort & !is.null(col_sort)) {
+    data <- data[, c(col_sort, setdiff(colnames(data), col_sort))]
+  }
+
 
   # Autoconvert numerics with only values 0, 1, NA to logicals
   if(convert_binary_numeric_to_factor){
     data <- convert_numerics_with_only_values_0_1_and_NA_to_logicals(data, exclude = col_id)
   }
+
 
   # Identify Plottable Columns  ------------------------------------------------------------
   df_col_info <- column_info_table(
@@ -284,7 +293,6 @@ ggstack <- function(
       )
 
       # Draw the actual plot
-
       ## Categorical -------------------------------------------------------------
       if (coltype == "categorical") {
         gg <- ggplot(
@@ -309,7 +317,7 @@ ggstack <- function(
           ggplot2::scale_x_discrete(drop = drop_unused_id_levels) +
           ggplot2::guides(fill = ggplot2::guide_legend(
             title.position = options$legend_title_position,
-            title = if (options$beautify_text) beautify(colname) else colname,
+            title = if (options$beautify_text) options$beautify_function(colname) else colname,
             nrow = min(ndistinct_including_na, options$legend_nrow),
             ncol = min(ndistinct_including_na, options$legend_ncol),
           )) +
@@ -323,10 +331,13 @@ ggstack <- function(
             vertical_spacing = options$vertical_spacing,
             fontsize_y_title = options$fontsize_y_title
           ) +
-          ggplot2::ylab(if (options$beautify_text) beautify(colname) else colname) +
-          ggplot2::scale_fill_manual(values = palette, na.value = options$colours_missing) +
+          ggplot2::ylab(if (options$beautify_text) options$beautify_function(colname) else colname) +
+          ggplot2::scale_fill_manual(
+            values = palette,
+            na.value = options$colours_missing,
+            labels = if(options$beautify_values) options$beautify_function else ggplot2::waiver()
+          ) +
           ggplot2::scale_y_discrete(position = options$y_axis_position)
-        # if(colname == "sex") browser()
       }
       # Numeric Bar -------------------------------------------------------------------------
       else if (coltype == "numeric" && options$numeric_plot_type == "bar") {
@@ -337,17 +348,35 @@ ggstack <- function(
           fontsize_y_title = options$fontsize_y_title,
           digits = options$max_digits_barplot_y_numbers
         )
-
         gg <- ggplot2::ggplot(data, aes(x = .data[[col_id]], y = .data[[colname]])) +
-          ggiraph::geom_col_interactive(mapping = aes_interactive, width = options$width, na.rm = TRUE) +
+          ggiraph::geom_col_interactive(
+
+            # Replace Inf with NA (avoids plotting bars for inf values since we later set na.rm = TRUE)
+            data = function(x){
+              x[is.infinite(x[[colname]]), colname] <- NA
+              return(x)
+              },
+            mapping = aes_interactive, width = options$width, na.rm = TRUE
+            ) +
+          # Add '!' to indicate missing data
           ggplot2::geom_text(
             data = function(x) {
               x[is.na(x[[colname]]), , drop = FALSE]
             }, # only add text where value is NA
-            aes(label = options$na_marker, y = 0), size = options$na_marker_size, na.rm = TRUE, vjust = 0, color = options$na_marker_colour
+            aes(label = options$na_marker, y = 0), size = options$na_marker_size, na.rm = TRUE, vjust = -0.5, color = options$na_marker_colour
+          ) +
+          # Add '↑' or to indicate positive infinite values
+          ggplot2::geom_text(
+            data = function(x) {
+              x[is.infinite(x[[colname]]), , drop = FALSE]
+            }, # only add text where value is NA
+            aes(label = ifelse(.data[[colname]] > 0, '\u2191', "\u2193"), y = 0),
+            size = options$na_marker_size,
+            na.rm = TRUE,
+            vjust = -0.5,
+            color = options$na_marker_colour
           ) +
           ggplot2::scale_x_discrete(drop = drop_unused_id_levels) +
-          # ggplot2::geom_hline(yintercept = breaks[c(1, 3)]) +
           ggplot2::scale_y_continuous(
             breaks = breaks,
             labels = labels,
@@ -370,11 +399,25 @@ ggstack <- function(
           ggplot2::scale_y_discrete(position = options$y_axis_position) +
           {
             if (options$show_na_marker_heatmap) {
+              # Add NA marker
               ggplot2::geom_text(
                 data = function(x) {
                   x[is.na(x[[colname]]), , drop = FALSE]
                 }, # only add text where value is NA
                 aes(label = options$na_marker), size = options$na_marker_size, na.rm = TRUE, vjust = 0.5
+              )
+            }
+          } +
+
+          # Add Up / Down arrow for infinite values (only if options$show_na_marker_heatmap)
+          {
+            if (options$show_na_marker_heatmap) {
+              ggplot2::geom_text(
+                data = function(x) {
+                  x[is.infinite(x[[colname]]), , drop = FALSE]
+                }, # only add text where value is NA
+                aes(label = ifelse(.data[[colname]] > 0, "\u2191",  "\u2193")),
+                size = options$na_marker_size, na.rm = TRUE, vjust = 0.5
               )
             }
           } +
@@ -402,6 +445,7 @@ ggstack <- function(
             high = options$colours_heatmap_high,
             na.value = options$colours_missing,
             trans = options$transform_heatmap,
+            oob = scales::squish_infinite,
             guide = ggplot2::guide_colorbar(
               direction = if (options$legend_orientation_heatmap == "horizontal") "horizontal" else "vertical",
               title.position = "top",
@@ -699,6 +743,7 @@ sensible_2_breaks <- function(vector) {
 }
 
 sensible_3_breaks <- function(vector, digits = 3) {
+  vector <- vector[!is.infinite(vector)]
   upper <- max(vector, na.rm = TRUE)
   lower <- min(0, min(vector, na.rm = TRUE), na.rm = TRUE)
 
@@ -718,6 +763,7 @@ sensible_3_breaks <- function(vector, digits = 3) {
 }
 
 sensible_3_labels <- function(vector, axis_label, fontsize_y_title = 14, digits = 3) {
+  vector <- vector[!is.infinite(vector)]
   upper <- max(vector, na.rm = TRUE)
   lower <- min(0, min(vector, na.rm = TRUE), na.rm = TRUE)
 
@@ -815,3 +861,13 @@ as_binary_factor <- function(vec){
   levels(vec) <- c(0, 1, NA)
   return(vec)
 }
+
+is.positive.infinity <- function(x){
+  is.infinite(x) & x > 0
+}
+
+is.negative.infinity <- function(x){
+  is.infinite(x) & x < 0
+}
+
+
